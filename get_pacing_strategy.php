@@ -19,6 +19,11 @@ try {
     $stmt = $conn->prepare("SELECT PlacementLevel FROM Students WHERE StudentID = ?");
     $stmt->execute([$studentId]);
     $student = $stmt->fetch();
+    
+    if (!$student) {
+        sendError("Student not found", 404);
+    }
+    
     $placementLevel = $student['PlacementLevel'];
     
     // Get recent quiz scores
@@ -84,6 +89,6 @@ try {
     
 } catch (PDOException $e) {
     error_log("Database error in get_pacing_strategy: " . $e->getMessage());
-    sendError("Failed to get pacing strategy", 500);
+    sendError("Failed to get pacing strategy", 500, $e->getMessage());
 }
 ?>

@@ -36,6 +36,8 @@ $BORDERLINE_THRESHOLD = 80;
 $MASTERY_THRESHOLD = 90;
 
 try {
+    $conn->beginTransaction();
+    
     // Get student placement level
     $stmt = $conn->prepare("SELECT PlacementLevel FROM Students WHERE StudentID = ?");
     $stmt->execute([$studentId]);
@@ -179,13 +181,30 @@ try {
         $xpEarned = 20;
     }
     
-    // Update quiz completion
+    // Check if StudentNodeProgress record exists
     $stmt = $conn->prepare("
-        UPDATE StudentNodeProgress 
-        SET QuizCompleted = 1, LastQuizScore = ? 
+        SELECT COUNT(*) as count FROM StudentNodeProgress 
         WHERE StudentID = ? AND NodeID = ?
     ");
-    $stmt->execute([$quizScore, $studentId, $nodeId]);
+    $stmt->execute([$studentId, $nodeId]);
+    $exists = $stmt->fetch()['count'] > 0;
+    
+    if ($exists) {
+        // Update existing record
+        $stmt = $conn->prepare("
+            UPDATE StudentNodeProgress 
+            SET QuizCompleted = 1, LastQuizScore = ? 
+            WHERE StudentID = ? AND NodeID = ?
+        ");
+        $stmt->execute([$quizScore, $studentId, $nodeId]);
+    } else {
+        // Insert new record
+        $stmt = $conn->prepare("
+            INSERT INTO StudentNodeProgress (StudentID, NodeID, QuizCompleted, LastQuizScore)
+            VALUES (?, ?, 1, ?)
+        ");
+        $stmt->execute([$studentId, $nodeId, $quizScore]);
+    }
     
     // Update student XP
     $stmt = $conn->prepare("UPDATE Students SET TotalXP = TotalXP + ? WHERE StudentID = ?");
@@ -205,6 +224,8 @@ try {
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, GETDATE())
     ");
     $stmt->execute([$studentId, $nodeId, $decision, $reason, $quizScore, $attemptCount, $scoreTrend, $supplementalNodeId]);
+    
+    $conn->commit();
     
     // Determine pacing
     $pacingStrategy = 'MODERATE';
@@ -233,7 +254,10 @@ try {
     ]);
     
 } catch (PDOException $e) {
+    if ($conn->inTransaction()) {
+        $conn->rollBack();
+    }
     error_log("Database error in submit_quiz: " . $e->getMessage());
-    sendError("Failed to submit quiz", 500);
+    sendError("Failed to submit quiz", 500, $e->getMessage());
 }
 ?>

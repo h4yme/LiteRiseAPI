@@ -60,6 +60,6 @@ try {
     
 } catch (PDOException $e) {
     error_log("Database error in get_module_ladder: " . $e->getMessage());
-    sendError("Failed to retrieve module ladder", 500);
+    sendError("Failed to retrieve module ladder", 500, $e->getMessage());
 }
 ?>
