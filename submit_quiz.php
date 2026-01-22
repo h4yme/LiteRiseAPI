@@ -1,263 +1,304 @@
 <?php
 /**
  * Submit Quiz API
- * POST /submit_quiz.php
+ * 
+ * Endpoint: POST /api/submit_quiz.php
+ * Description: Submits quiz answers and determines adaptive branching
  * 
  * Request Body:
  * {
  *   "student_id": 1,
- *   "node_id": 5,
- *   "quiz_score": 85,
- *   "attempt_count": 1,
- *   "recent_scores": [75, 80],
- *   "time_spent": 180
+ *   "node_id": 1,
+ *   "placement_level": 2,
+ *   "answers": {
+ *     "1": 1,
+ *     "2": 3
+ *   }
+ * }
+ * 
+ * Response:
+ * {
+ *   "success": true,
+ *   "result": {
+ *     "score_percent": 80,
+ *     "correct_count": 4,
+ *     "total_questions": 5,
+ *     "adaptive_decision": "PROCEED",
+ *     "xp_awarded": 80,
+ *     "unlocked_nodes": [...]
+ *   }
  * }
  */
 
+header('Content-Type: application/json');
+header('Access-Control-Allow-Origin: *');
+header('Access-Control-Allow-Methods: POST');
+header('Access-Control-Allow-Headers: Content-Type');
+
 require_once __DIR__ . '/src/db.php';
-require_once __DIR__ . '/src/auth.php';
-
-// Get JSON input
-$data = getJsonInput();
-
-// Validate required fields
-validateRequired($data, ['student_id', 'node_id', 'quiz_score', 'attempt_count', 'time_spent']);
-
-$studentId = intval($data['student_id']);
-$nodeId = intval($data['node_id']);
-$quizScore = intval($data['quiz_score']);
-$attemptCount = intval($data['attempt_count']);
-$recentScores = $data['recent_scores'] ?? [];
-$timeSpent = intval($data['time_spent']);
-
-// Constants
-$PASS_THRESHOLD = 70;
-$BORDERLINE_THRESHOLD = 80;
-$MASTERY_THRESHOLD = 90;
 
 try {
-    $conn->beginTransaction();
+    // Get POST data
+    $input = file_get_contents('php://input');
+    $data = json_decode($input, true);
     
-    // Get student placement level
-    $stmt = $conn->prepare("SELECT PlacementLevel FROM Students WHERE StudentID = ?");
-    $stmt->execute([$studentId]);
-    $student = $stmt->fetch();
-    $placementLevel = $student['PlacementLevel'];
-    
-    // Get node info
-    $stmt = $conn->prepare("SELECT * FROM Nodes WHERE NodeID = ?");
-    $stmt->execute([$nodeId]);
-    $node = $stmt->fetch();
-    $moduleId = $node['ModuleID'];
-    
-    // Calculate score trend
-    $scoreTrend = 'STABLE';
-    if (count($recentScores) >= 2) {
-        $lastScore = $recentScores[count($recentScores) - 1];
-        $prevScore = $recentScores[count($recentScores) - 2];
-        if ($quizScore > $lastScore && $lastScore > $prevScore) {
-            $scoreTrend = 'IMPROVING';
-        } elseif ($quizScore < $lastScore && $lastScore < $prevScore) {
-            $scoreTrend = 'DECLINING';
-        }
+    if (json_last_error() !== JSON_ERROR_NONE) {
+        http_response_code(400);
+        echo json_encode([
+            'success' => false,
+            'message' => 'Invalid JSON format'
+        ]);
+        exit;
     }
     
-    // Adaptive decision logic
-    $decision = '';
-    $nextNodeId = null;
-    $supplementalNodeId = null;
-    $reason = '';
-    $xpEarned = 0;
+    $studentId = isset($data['student_id']) ? intval($data['student_id']) : 0;
+    $nodeId = isset($data['node_id']) ? intval($data['node_id']) : 0;
+    $placementLevel = isset($data['placement_level']) ? intval($data['placement_level']) : 2;
+    $answers = isset($data['answers']) ? $data['answers'] : [];
     
-    if ($quizScore < $PASS_THRESHOLD) {
-        // INTERVENTION: Failed quiz
-        $decision = 'ADD_INTERVENTION';
-        $reason = "Score below 70% - additional help needed";
-        
-        // Find intervention node
-        $stmt = $conn->prepare("
-            SELECT SupplementalNodeID FROM SupplementalNodes 
-            WHERE AfterNodeID = ? AND NodeType = 'INTERVENTION'
-            LIMIT 1
-        ");
-        $stmt->execute([$nodeId]);
-        $suppNode = $stmt->fetch();
-        
-        if ($suppNode) {
-            $supplementalNodeId = $suppNode['SupplementalNodeID'];
-            // Mark as visible
-            $stmt = $conn->prepare("UPDATE SupplementalNodes SET IsVisible = 1 WHERE SupplementalNodeID = ?");
-            $stmt->execute([$supplementalNodeId]);
-        }
-        $xpEarned = 5;
-        
-    } elseif ($quizScore >= $PASS_THRESHOLD && $quizScore < $BORDERLINE_THRESHOLD) {
-        // SUPPLEMENTAL: Borderline pass
-        if ($placementLevel == 1) {
-            $decision = 'ADD_SUPPLEMENTAL';
-            $reason = "Borderline pass - extra practice recommended for beginners";
-            
-            $stmt = $conn->prepare("
-                SELECT SupplementalNodeID FROM SupplementalNodes 
-                WHERE AfterNodeID = ? AND NodeType = 'SUPPLEMENTAL'
-                LIMIT 1
-            ");
-            $stmt->execute([$nodeId]);
-            $suppNode = $stmt->fetch();
-            
-            if ($suppNode) {
-                $supplementalNodeId = $suppNode['SupplementalNodeID'];
-                $stmt = $conn->prepare("UPDATE SupplementalNodes SET IsVisible = 1 WHERE SupplementalNodeID = ?");
-                $stmt->execute([$supplementalNodeId]);
-            }
-        } else {
-            $decision = 'PROCEED';
-            $reason = "Passed quiz - ready for next lesson";
-        }
-        
-        // Get next node
-        $stmt = $conn->prepare("
-            SELECT NodeID FROM Nodes 
-            WHERE ModuleID = ? AND NodeNumber > ?
-            ORDER BY NodeNumber ASC 
-            LIMIT 1
-        ");
-        $stmt->execute([$moduleId, $node['NodeNumber']]);
-        $nextNode = $stmt->fetch();
-        if ($nextNode) {
-            $nextNodeId = $nextNode['NodeID'];
-        }
-        $xpEarned = 15;
-        
-    } elseif ($quizScore >= $MASTERY_THRESHOLD && $placementLevel == 3) {
-        // ENRICHMENT: High mastery
-        $decision = 'OFFER_ENRICHMENT';
-        $reason = "Excellent performance - challenge content available";
-        
-        $stmt = $conn->prepare("
-            SELECT SupplementalNodeID FROM SupplementalNodes 
-            WHERE AfterNodeID = ? AND NodeType = 'ENRICHMENT'
-            LIMIT 1
-        ");
-        $stmt->execute([$nodeId]);
-        $suppNode = $stmt->fetch();
-        
-        if ($suppNode) {
-            $supplementalNodeId = $suppNode['SupplementalNodeID'];
-            $stmt = $conn->prepare("UPDATE SupplementalNodes SET IsVisible = 1 WHERE SupplementalNodeID = ?");
-            $stmt->execute([$supplementalNodeId]);
-        }
-        
-        // Get next node
-        $stmt = $conn->prepare("
-            SELECT NodeID FROM Nodes 
-            WHERE ModuleID = ? AND NodeNumber > ?
-            ORDER BY NodeNumber ASC 
-            LIMIT 1
-        ");
-        $stmt->execute([$moduleId, $node['NodeNumber']]);
-        $nextNode = $stmt->fetch();
-        if ($nextNode) {
-            $nextNodeId = $nextNode['NodeID'];
-        }
-        $xpEarned = 25;
-        
-    } else {
-        // PROCEED: Good pass
-        $decision = 'PROCEED';
-        $reason = "Good performance - ready for next lesson";
-        
-        $stmt = $conn->prepare("
-            SELECT NodeID FROM Nodes 
-            WHERE ModuleID = ? AND NodeNumber > ?
-            ORDER BY NodeNumber ASC 
-            LIMIT 1
-        ");
-        $stmt->execute([$moduleId, $node['NodeNumber']]);
-        $nextNode = $stmt->fetch();
-        if ($nextNode) {
-            $nextNodeId = $nextNode['NodeID'];
-        }
-        $xpEarned = 20;
+    if ($studentId === 0 || $nodeId === 0 || empty($answers)) {
+        http_response_code(400);
+        echo json_encode([
+            'success' => false,
+            'message' => 'Missing required data: student_id, node_id, and answers are required'
+        ]);
+        exit;
     }
     
-    // Check if StudentNodeProgress record exists
+    // Get correct answers
+    $questionIds = array_keys($answers);
+    $placeholders = implode(',', array_fill(0, count($questionIds), '?'));
+    
     $stmt = $conn->prepare("
-        SELECT COUNT(*) as count FROM StudentNodeProgress 
-        WHERE StudentID = ? AND NodeID = ?
+        SELECT QuestionID, CorrectAnswer
+        FROM QuizQuestions
+        WHERE QuestionID IN ($placeholders)
     ");
-    $stmt->execute([$studentId, $nodeId]);
-    $exists = $stmt->fetch()['count'] > 0;
+    $stmt->execute($questionIds);
+    $correctAnswers = $stmt->fetchAll(PDO::FETCH_KEY_PAIR);
     
-    if ($exists) {
-        // Update existing record
-        $stmt = $conn->prepare("
-            UPDATE StudentNodeProgress 
-            SET QuizCompleted = 1, LastQuizScore = ? 
-            WHERE StudentID = ? AND NodeID = ?
-        ");
-        $stmt->execute([$quizScore, $studentId, $nodeId]);
-    } else {
-        // Insert new record
-        $stmt = $conn->prepare("
-            INSERT INTO StudentNodeProgress (StudentID, NodeID, QuizCompleted, LastQuizScore)
-            VALUES (?, ?, 1, ?)
-        ");
-        $stmt->execute([$studentId, $nodeId, $quizScore]);
+    // Calculate score
+    $correctCount = 0;
+    $totalQuestions = count($answers);
+    
+    foreach ($answers as $questionId => $studentAnswer) {
+        if (isset($correctAnswers[$questionId]) && 
+            $correctAnswers[$questionId] == $studentAnswer) {
+            $correctCount++;
+        }
     }
     
-    // Update student XP
-    $stmt = $conn->prepare("UPDATE Students SET TotalXP = TotalXP + ? WHERE StudentID = ?");
-    $stmt->execute([$xpEarned, $studentId]);
+    $scorePercent = ($correctCount / $totalQuestions) * 100;
     
-    // Save quiz attempt
-    $stmt = $conn->prepare("
-        INSERT INTO QuizAttempts (StudentID, NodeID, Score, AttemptNumber, TimeSpent, CompletedDate)
-        VALUES (?, ?, ?, ?, ?, GETDATE())
-    ");
-    $stmt->execute([$studentId, $nodeId, $quizScore, $attemptCount, $timeSpent]);
+    // Determine adaptive decision
+    $adaptiveDecision = determineAdaptiveDecision($scorePercent, $placementLevel);
     
-    // Save adaptive decision
-    $stmt = $conn->prepare("
-        INSERT INTO AdaptiveDecisions 
-        (StudentID, NodeID, DecisionType, Reason, QuizScore, AttemptCount, ScoreTrend, SupplementalNodeTriggered, CreatedDate)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, GETDATE())
-    ");
-    $stmt->execute([$studentId, $nodeId, $decision, $reason, $quizScore, $attemptCount, $scoreTrend, $supplementalNodeId]);
+    // Calculate XP
+    $xpAwarded = calculateXP($scorePercent);
     
-    $conn->commit();
+    // Update node progress
+    updateNodeProgress($conn, $studentId, $nodeId, $scorePercent, $adaptiveDecision);
     
-    // Determine pacing
-    $pacingStrategy = 'MODERATE';
-    if ($placementLevel == 1 || $scoreTrend == 'DECLINING') {
-        $pacingStrategy = 'SLOW';
-    } elseif ($placementLevel == 3 && $scoreTrend == 'IMPROVING') {
-        $pacingStrategy = 'FAST';
-    }
+    // Award XP
+    awardXP($conn, $studentId, $xpAwarded);
     
-    // Generate message
-    $messages = [
-        'ADD_INTERVENTION' => "Let's practice this topic more before moving on.",
-        'ADD_SUPPLEMENTAL' => "Good work! Here's some extra practice to strengthen your skills.",
-        'OFFER_ENRICHMENT' => "Excellent! Ready for a challenge?",
-        'PROCEED' => "Great job! Moving to the next lesson."
-    ];
+    // Handle adaptive branching
+    $unlockedNodes = handleAdaptiveBranching($conn, $studentId, $nodeId, $adaptiveDecision);
     
-    sendResponse([
-        'decision' => $decision,
-        'reason' => $reason,
-        'next_node_id' => $nextNodeId,
-        'supplemental_node_id' => $supplementalNodeId,
-        'pacing_strategy' => $pacingStrategy,
-        'message' => $messages[$decision],
-        'xp_earned' => $xpEarned
+    http_response_code(200);
+    echo json_encode([
+        'success' => true,
+        'result' => [
+            'score_percent' => round($scorePercent, 2),
+            'correct_count' => $correctCount,
+            'total_questions' => $totalQuestions,
+            'adaptive_decision' => $adaptiveDecision,
+            'xp_awarded' => $xpAwarded,
+            'unlocked_nodes' => $unlockedNodes
+        ]
     ]);
     
 } catch (PDOException $e) {
-    if ($conn->inTransaction()) {
-        $conn->rollBack();
+    http_response_code(500);
+    echo json_encode([
+        'success' => false,
+        'message' => 'Database error',
+        'error' => (($_ENV['DEBUG_MODE'] ?? 'false') === 'true') ? $e->getMessage() : null
+    ]);
+} catch (Exception $e) {
+    http_response_code(500);
+    echo json_encode([
+        'success' => false,
+        'message' => 'Server error',
+        'error' => (($_ENV['DEBUG_MODE'] ?? 'false') === 'true') ? $e->getMessage() : null
+    ]);
+}
+
+
+function determineAdaptiveDecision($scorePercent, $placementLevel) {
+    if ($scorePercent < 70) {
+        return 'ADD_INTERVENTION';
+    } elseif ($scorePercent >= 70 && $scorePercent < 80 && $placementLevel == 1) {
+        return 'ADD_SUPPLEMENTAL';
+    } elseif ($scorePercent >= 90 && $placementLevel == 3) {
+        return 'OFFER_ENRICHMENT';
+    } else {
+        return 'PROCEED';
     }
-    error_log("Database error in submit_quiz: " . $e->getMessage());
-    sendError("Failed to submit quiz", 500, $e->getMessage());
+}
+
+function calculateXP($scorePercent) {
+    if ($scorePercent >= 90) return 100;
+    elseif ($scorePercent >= 80) return 80;
+    elseif ($scorePercent >= 70) return 60;
+    elseif ($scorePercent >= 60) return 40;
+    else return 20;
+}
+
+function updateNodeProgress($conn, $studentId, $nodeId, $score, $decision) {
+    $stmt = $conn->prepare("
+        SELECT COUNT(*) FROM StudentNodeProgress
+        WHERE StudentID = ? AND NodeID = ?
+    ");
+    $stmt->execute([$studentId, $nodeId]);
+    $exists = $stmt->fetchColumn();
+    
+    if ($exists) {
+        $stmt = $conn->prepare("
+            UPDATE StudentNodeProgress
+            SET QuizCompleted = 1,
+                QuizScore = ?,
+                AdaptiveDecision = ?,
+                CompletedAt = GETDATE()
+            WHERE StudentID = ? AND NodeID = ?
+        ");
+        $stmt->execute([$score, $decision, $studentId, $nodeId]);
+    } else {
+        $stmt = $conn->prepare("
+            INSERT INTO StudentNodeProgress (StudentID, NodeID, LessonCompleted, GameCompleted, QuizCompleted, QuizScore, AdaptiveDecision, CompletedAt)
+            VALUES (?, ?, 1, 1, 1, ?, ?, GETDATE())
+        ");
+        $stmt->execute([$studentId, $nodeId, $score, $decision]);
+    }
+}
+
+function awardXP($conn, $studentId, $xp) {
+    $stmt = $conn->prepare("
+        UPDATE Students
+        SET TotalXP = ISNULL(TotalXP, 0) + ?
+        WHERE StudentID = ?
+    ");
+    $stmt->execute([$xp, $studentId]);
+}
+
+function handleAdaptiveBranching($conn, $studentId, $nodeId, $decision) {
+    $unlockedNodes = [];
+    
+    switch ($decision) {
+        case 'ADD_INTERVENTION':
+            $stmt = $conn->prepare("
+                SELECT NodeID, Title
+                FROM SupplementalNodes
+                WHERE AfterNodeID = ? AND NodeType = 'INTERVENTION'
+            ");
+            $stmt->execute([$nodeId]);
+            $interventions = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            
+            foreach ($interventions as $node) {
+                $stmt = $conn->prepare("
+                    IF NOT EXISTS (SELECT 1 FROM StudentNodeProgress WHERE StudentID = ? AND NodeID = ?)
+                    INSERT INTO StudentNodeProgress (StudentID, NodeID, LessonCompleted, GameCompleted, QuizCompleted)
+                    VALUES (?, ?, 0, 0, 0)
+                ");
+                $stmt->execute([$studentId, $node['NodeID'], $studentId, $node['NodeID']]);
+                $unlockedNodes[] = [
+                    'type' => 'INTERVENTION',
+                    'node_id' => $node['NodeID'],
+                    'title' => $node['Title'],
+                    'mandatory' => true
+                ];
+            }
+            break;
+            
+        case 'ADD_SUPPLEMENTAL':
+            $stmt = $conn->prepare("
+                SELECT NodeID, Title
+                FROM SupplementalNodes
+                WHERE AfterNodeID = ? AND NodeType = 'SUPPLEMENTAL'
+            ");
+            $stmt->execute([$nodeId]);
+            $supplementals = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            
+            foreach ($supplementals as $node) {
+                $stmt = $conn->prepare("
+                    IF NOT EXISTS (SELECT 1 FROM StudentNodeProgress WHERE StudentID = ? AND NodeID = ?)
+                    INSERT INTO StudentNodeProgress (StudentID, NodeID, LessonCompleted, GameCompleted, QuizCompleted)
+                    VALUES (?, ?, 0, 0, 0)
+                ");
+                $stmt->execute([$studentId, $node['NodeID'], $studentId, $node['NodeID']]);
+                $unlockedNodes[] = [
+                    'type' => 'SUPPLEMENTAL',
+                    'node_id' => $node['NodeID'],
+                    'title' => $node['Title'],
+                    'mandatory' => false
+                ];
+            }
+            break;
+            
+        case 'OFFER_ENRICHMENT':
+            $stmt = $conn->prepare("
+                SELECT NodeID, Title
+                FROM SupplementalNodes
+                WHERE AfterNodeID = ? AND NodeType = 'ENRICHMENT'
+            ");
+            $stmt->execute([$nodeId]);
+            $enrichments = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            
+            foreach ($enrichments as $node) {
+                $stmt = $conn->prepare("
+                    IF NOT EXISTS (SELECT 1 FROM StudentNodeProgress WHERE StudentID = ? AND NodeID = ?)
+                    INSERT INTO StudentNodeProgress (StudentID, NodeID, LessonCompleted, GameCompleted, QuizCompleted)
+                    VALUES (?, ?, 0, 0, 0)
+                ");
+                $stmt->execute([$studentId, $node['NodeID'], $studentId, $node['NodeID']]);
+                $unlockedNodes[] = [
+                    'type' => 'ENRICHMENT',
+                    'node_id' => $node['NodeID'],
+                    'title' => $node['Title'],
+                    'mandatory' => false
+                ];
+            }
+            break;
+            
+        case 'PROCEED':
+        default:
+            $stmt = $conn->prepare("
+                SELECT TOP 1 NodeID, LessonTitle
+                FROM Nodes
+                WHERE ModuleID = (SELECT ModuleID FROM Nodes WHERE NodeID = ?)
+                AND NodeNumber > (SELECT NodeNumber FROM Nodes WHERE NodeID = ?)
+                AND NodeType = 'CORE_LESSON'
+                ORDER BY NodeNumber ASC
+            ");
+            $stmt->execute([$nodeId, $nodeId]);
+            $nextNode = $stmt->fetch(PDO::FETCH_ASSOC);
+            
+            if ($nextNode) {
+                $stmt = $conn->prepare("
+                    IF NOT EXISTS (SELECT 1 FROM StudentNodeProgress WHERE StudentID = ? AND NodeID = ?)
+                    INSERT INTO StudentNodeProgress (StudentID, NodeID, LessonCompleted, GameCompleted, QuizCompleted)
+                    VALUES (?, ?, 0, 0, 0)
+                ");
+                $stmt->execute([$studentId, $nextNode['NodeID'], $studentId, $nextNode['NodeID']]);
+                $unlockedNodes[] = [
+                    'type' => 'NEXT_NODE',
+                    'node_id' => $nextNode['NodeID'],
+                    'title' => $nextNode['LessonTitle']
+                ];
+            }
+            break;
+    }
+    
+    return $unlockedNodes;
 }
 ?>
