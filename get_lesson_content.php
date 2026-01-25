@@ -36,14 +36,14 @@ try {
         exit;
     }
     
-    // Get node content
+    // Get node content with corrected column names
     $stmt = $conn->prepare("
         SELECT 
             n.NodeID,
             n.NodeNumber,
             n.LessonTitle,
-            n.LessonObjective,
-            n.LessonContent,
+            n.LearningObjectives,
+            n.ContentJSON,
             n.NodeType,
             n.Quarter,
             n.ModuleID,
@@ -69,7 +69,7 @@ try {
     $pacing = getPacingStrategy($placementLevel);
     
     // Generate adaptive content
-    $content = generateAdaptiveContent($node['LessonContent'], $placementLevel);
+    $content = generateAdaptiveContent($node['ContentJSON'], $placementLevel);
     
     http_response_code(200);
     echo json_encode([
@@ -78,7 +78,7 @@ try {
             'node_id' => $node['NodeID'],
             'node_number' => $node['NodeNumber'],
             'title' => $node['LessonTitle'],
-            'objective' => $node['LessonObjective'],
+            'objective' => $node['LearningObjectives'],
             'content' => $content,
             'module_id' => $node['ModuleID'],
             'module_name' => $node['ModuleName'],
@@ -93,14 +93,14 @@ try {
     echo json_encode([
         'success' => false,
         'message' => 'Database error',
-        'error' => (($_ENV['DEBUG_MODE'] ?? 'false') === 'true') ? $e->getMessage() : null
+        'error' => $e->getMessage()
     ]);
 } catch (Exception $e) {
     http_response_code(500);
     echo json_encode([
         'success' => false,
         'message' => 'Server error',
-        'error' => (($_ENV['DEBUG_MODE'] ?? 'false') === 'true') ? $e->getMessage() : null
+        'error' => $e->getMessage()
     ]);
 }
 

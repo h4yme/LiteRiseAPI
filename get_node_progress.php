@@ -34,9 +34,9 @@ try {
             LessonCompleted,
             GameCompleted,
             QuizCompleted,
-            QuizScore,
-            AdaptiveDecision,
-            CompletedAt
+            LatestQuizScore,
+            NodeState,
+            CompletedDate
         FROM StudentNodeProgress
         WHERE StudentID = ? AND NodeID = ?
     ");
@@ -52,7 +52,8 @@ try {
                 'game_completed' => false,
                 'quiz_completed' => false,
                 'quiz_score' => 0,
-                'adaptive_decision' => null
+                'adaptive_decision' => null,
+                'completed_at' => null
             ]
         ]);
     } else {
@@ -63,9 +64,9 @@ try {
                 'lesson_completed' => (bool)$progress['LessonCompleted'],
                 'game_completed' => (bool)$progress['GameCompleted'],
                 'quiz_completed' => (bool)$progress['QuizCompleted'],
-                'quiz_score' => $progress['QuizScore'],
-                'adaptive_decision' => $progress['AdaptiveDecision'],
-                'completed_at' => $progress['CompletedAt']
+                'quiz_score' => (float)$progress['LatestQuizScore'],
+                'adaptive_decision' => $progress['NodeState'], // Using NodeState as adaptive decision
+                'completed_at' => $progress['CompletedDate']
             ]
         ]);
     }
@@ -75,14 +76,14 @@ try {
     echo json_encode([
         'success' => false,
         'message' => 'Database error',
-        'error' => (($_ENV['DEBUG_MODE'] ?? 'false') === 'true') ? $e->getMessage() : null
+        'error' => $e->getMessage()
     ]);
 } catch (Exception $e) {
     http_response_code(500);
     echo json_encode([
         'success' => false,
         'message' => 'Server error',
-        'error' => (($_ENV['DEBUG_MODE'] ?? 'false') === 'true') ? $e->getMessage() : null
+        'error' => $e->getMessage()
     ]);
 }
 
